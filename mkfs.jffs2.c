@@ -49,7 +49,6 @@
 
 #define PROGRAM_NAME "mkfs.jffs2"
 
-#define _GNU_SOURCE
 #include <sys/types.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -470,7 +469,7 @@ static int interpret_table_entry(struct filesystem_entry *root, char *line)
 	} else {
 		/* If parent is NULL (happens with device table entries),
 		 * try and find our parent now) */
-		tmp = strdup(name);
+		tmp = xstrdup(name);
 		dir = dirname(tmp);
 		parent = find_filesystem_entry(root, dir, S_IFDIR);
 		free(tmp);
@@ -1233,7 +1232,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 		} else switch (e->sb.st_mode & S_IFMT) {
 			case S_IFDIR:
 				if (verbose) {
-					printf("\td %04o %9" PRIu64 "             %5d:%-3d %s\n",
+					printf("\td %04o %9" PRIdoff_t "             %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) (e->sb.st_uid), (int) (e->sb.st_gid),
 							e->name);
@@ -1243,7 +1242,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				break;
 			case S_IFSOCK:
 				if (verbose) {
-					printf("\ts %04o %9" PRIu64 "             %5d:%-3d %s\n",
+					printf("\ts %04o %9" PRIdoff_t "             %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name);
 				}
@@ -1252,7 +1251,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				break;
 			case S_IFIFO:
 				if (verbose) {
-					printf("\tp %04o %9" PRIu64 "             %5d:%-3d %s\n",
+					printf("\tp %04o %9" PRIdoff_t "             %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name);
 				}
@@ -1281,7 +1280,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				break;
 			case S_IFLNK:
 				if (verbose) {
-					printf("\tl %04o %9" PRIu64 "             %5d:%-3d %s -> %s\n",
+					printf("\tl %04o %9" PRIdoff_t "             %5d:%-3d %s -> %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name,
 							e->link);
@@ -1293,7 +1292,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				wrote = write_regular_file(e);
 				write_xattr_entry(e);
 				if (verbose) {
-					printf("\tf %04o %9" PRIu64 " (%9u) %5d:%-3d %s\n",
+					printf("\tf %04o %9" PRIdoff_t " (%9u) %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size, wrote,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name);
 				}
@@ -1396,14 +1395,14 @@ static const char helptext[] =
 "                          page size (default: 4KiB)\n"
 "  -e, --eraseblock=SIZE   Use erase block size SIZE (default: 64KiB)\n"
 "  -c, --cleanmarker=SIZE  Size of cleanmarker (default 12)\n"
-"  -m, --compr-mode=MODE   Select compression mode (default: priortiry)\n"
+"  -m, --compr-mode=MODE   Select compression mode (default: priority)\n"
 "  -x, --disable-compressor=COMPRESSOR_NAME\n"
 "                          Disable a compressor\n"
 "  -X, --enable-compressor=COMPRESSOR_NAME\n"
 "                          Enable a compressor\n"
 "  -y, --compressor-priority=PRIORITY:COMPRESSOR_NAME\n"
 "                          Set the priority of a compressor\n"
-"  -L, --list-compressors  Show the list of the avaiable compressors\n"
+"  -L, --list-compressors  Show the list of the available compressors\n"
 "  -t, --test-compression  Call decompress and compare with the original (for test)\n"
 "  -n, --no-cleanmarkers   Don't add a cleanmarker to every eraseblock\n"
 "  -o, --output=FILE       Output to FILE (default: stdout)\n"

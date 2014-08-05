@@ -32,11 +32,11 @@
 #include <assert.h>
 #include <mntent.h>
 #include <execinfo.h>
+#include <bits/stdio_lim.h>
 #include <sys/mman.h>
 #include <sys/vfs.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
-#include <linux/fs.h>
 
 #define PROGRAM_VERSION "1.1"
 #define PROGRAM_NAME "integck"
@@ -899,8 +899,8 @@ static ssize_t file_write_data(struct file_info *file, int fd, off_t offset,
 	remains = size;
 	actual = 0;
 	written = IO_BUFFER_SIZE;
-	v("write %zd bytes, offset %llu, file %s",
-	  size, (unsigned long long)offset, get_file_name(file));
+	v("write %zd bytes, offset %"PRIdoff_t", file %s",
+	  size, offset, get_file_name(file));
 	while (remains) {
 		/* Fill up buffer with random data */
 		if (written < IO_BUFFER_SIZE) {
@@ -959,9 +959,6 @@ static void file_write_info(struct file_info *file, int fd, off_t offset,
 	w->size = size;
 	w->random_seed = seed;
 	file->raw_writes = w;
-
-	if (args.verify_ops && !args.power_cut_mode)
-		file_check_data(file, fd, new_write);
 
 	/* Insert it into file->writes */
 	inserted = 0;
@@ -1028,6 +1025,9 @@ static void file_write_info(struct file_info *file, int fd, off_t offset,
 	/* Update file length */
 	if (end > file->length)
 		file->length = end;
+
+	if (args.verify_ops && !args.power_cut_mode)
+		file_check_data(file, fd, new_write);
 }
 
 /* Randomly select offset and and size to write in a file */
@@ -1433,12 +1433,17 @@ static void save_file(int fd, struct file_info *file)
 	int w_fd;
 	struct write_info *w;
 	char buf[IO_BUFFER_SIZE];
-	char name[256];
+	char name[FILENAME_MAX];
+	const char * read_suffix = ".integ.sav.read";
+	const char * write_suffix = ".integ.sav.written";
+	size_t fname_len = strlen(get_file_name(file));
 
 	/* Open file to save contents to */
 	strcpy(name, "/tmp/");
-	strcat(name, get_file_name(file));
-	strcat(name, ".integ.sav.read");
+	if (fname_len + strlen(read_suffix) > fsinfo.max_name_len)
+		fname_len = fsinfo.max_name_len - strlen(read_suffix);
+	strncat(name, get_file_name(file), fname_len);
+	strcat(name, read_suffix);
 	normsg("Saving %sn", name);
 	w_fd = open(name, O_CREAT | O_WRONLY, 0777);
 	CHECK(w_fd != -1);
@@ -1457,8 +1462,10 @@ static void save_file(int fd, struct file_info *file)
 
 	/* Open file to save contents to */
 	strcpy(name, "/tmp/");
-	strcat(name, get_file_name(file));
-	strcat(name, ".integ.sav.written");
+	if (fname_len + strlen(write_suffix) > fsinfo.max_name_len)
+		fname_len = fsinfo.max_name_len - strlen(write_suffix);
+	strncat(name, get_file_name(file), fname_len);
+	strcat(name, write_suffix);
 	normsg("Saving %s", name);
 	w_fd = open(name, O_CREAT | O_WRONLY, 0777);
 	CHECK(w_fd != -1);
@@ -1502,7 +1509,8 @@ static void file_check_data(struct file_info *file, int fd,
 {
 	size_t remains, block, i;
 	off_t r;
-	char buf[IO_BUFFER_SIZE];
+	unsigned char read_buf[IO_BUFFER_SIZE];
+	unsigned char check_buf[IO_BUFFER_SIZE];
 	unsigned int seed = w->random_seed;
 
 	if (args.power_cut_mode && !file->clean)
@@ -1517,17 +1525,28 @@ static void file_check_data(struct file_info *file, int fd,
 			block = IO_BUFFER_SIZE;
 		else
 			block = remains;
-		CHECK(read(fd, buf, block) == block);
-		for (i = 0; i < block; ++i) {
-			char c = (char)rand_r(&seed);
-			if (buf[i] != c) {
-				errmsg("file_check_data failed at %zu checking "
-				       "data at %llu size %zu", w->size - remains + i,
-					(unsigned long long)w->offset, w->size);
-				file_info_display(file);
-				save_file(fd, file);
-			}
-			CHECK(buf[i] == c);
+		CHECK(read(fd, read_buf, block) == block);
+		for (i = 0; i < block; ++i)
+			check_buf[i] = (char)rand_r(&seed);
+
+		if (memcmp(check_buf, read_buf, block) != 0) {
+			errmsg("file_check_data failed, dumping "
+				"data at offset %llu size %zu",
+				(unsigned long long)w->offset, w->size);
+
+			fprintf (stderr, "Read data:\n");
+			for (r = 0; r < block; ++r)
+				fprintf(stderr, "%02x%c",
+					read_buf[r], ((r+1)%16)?' ':'\n');
+			fprintf(stderr, "\nExpected data:\n");
+			for (r = 0; r < block; ++r)
+				fprintf(stderr, "%02x%c",
+					check_buf[r], ((r+1)%16)?' ':'\n');
+			fprintf(stderr, " \n");
+
+			file_info_display(file);
+			save_file(fd, file);
+			CHECK(0);
 		}
 		remains -= block;
 	}
@@ -2898,20 +2917,20 @@ static struct mntent *get_tested_fs_mntent(void)
 {
 	const char *mp;
 	struct mntent *mntent;
-        FILE *f;
+	FILE *f;
 
 	mp = "/proc/mounts";
-        f = fopen(mp, "rb");
-        if (!f) {
+	f = fopen(mp, "rb");
+	if (!f) {
 		mp = "/etc/mtab";
-                f = fopen(mp, "rb");
+		f = fopen(mp, "rb");
 	}
 	CHECK(f != NULL);
 
-        while ((mntent = getmntent(f)) != NULL)
+	while ((mntent = getmntent(f)) != NULL)
 		if (!strcmp(mntent->mnt_dir, fsinfo.mount_point))
 			break;
-        CHECK(fclose(f) == 0);
+	CHECK(fclose(f) == 0);
 	return mntent;
 }
 
@@ -3152,6 +3171,7 @@ static int reattach(void)
 	req.mtd_num = args.mtdn;
 	req.vid_hdr_offset = 0;
 	req.mtd_dev_node = NULL;
+	req.max_beb_per1024 = 0;
 
 	err = ubi_attach(libubi, "/dev/ubi_ctrl", &req);
 	if (err)

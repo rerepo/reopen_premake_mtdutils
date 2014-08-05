@@ -13,7 +13,25 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 
+#include <common.h>
 #include <mtd/mtd-user.h>
+
+ssize_t xread(int fd, void *buf, size_t count)
+{
+	ssize_t ret, done = 0;
+
+retry:
+	ret = read(fd, buf + done, count - done);
+	if (ret < 0)
+		return ret;
+
+	done += ret;
+
+	if (ret == 0 /* EOF */ || done == count)
+		return done;
+	else
+		goto retry;
+}
 
 int main(int argc,char *argv[])
 {
@@ -47,7 +65,7 @@ int main(int argc,char *argv[])
 		return errno;
 	}
 
-	offset = strtoul(argv[3], &p, 0);
+	offset = (off_t)strtoull(argv[3], &p, 0);
 	if (argv[3][0] == 0 || *p != 0) {
 		fprintf(stderr, "%s: bad offset value\n", PROGRAM_NAME);
 		return ERANGE;
@@ -58,22 +76,28 @@ int main(int argc,char *argv[])
 		return errno;
 	}
 
-	printf("Writing OTP user data on %s at offset 0x%lx\n", argv[2], offset);
+	printf("Writing OTP user data on %s at offset 0x%"PRIxoff_t"\n", argv[2], offset);
 
-	if (mtdInfo.type == MTD_NANDFLASH)
+	if (mtd_type_is_nand_user(&mtdInfo))
 		len = mtdInfo.writesize;
 	else
 		len = 256;
 
+	if (len > sizeof(buf)) {
+		printf("huh, writesize (%d) bigger than buffer (%zu)\n",
+				len, sizeof(buf));
+		return ENOMEM;
+	}
+
 	wrote = 0;
-	while ((size = read(0, buf, len))) {
+	while ((size = xread(0, buf, len))) {
 		if (size < 0) {
 			perror("read()");
 			return errno;
 		}
 		p = buf;
 		while (size > 0) {
-			if (mtdInfo.type == MTD_NANDFLASH) {
+			if (mtd_type_is_nand_user(&mtdInfo)) {
 				/* Fill remain buffers with 0xff */
 				memset(buf + size, 0xff, mtdInfo.writesize - size);
 				size = mtdInfo.writesize;

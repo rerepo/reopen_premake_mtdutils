@@ -20,6 +20,7 @@
  *          Zoltan Sogor
  */
 
+#define _XOPEN_SOURCE 500 /* For realpath() */
 #define PROGRAM_NAME "mkfs.ubifs"
 
 #include "mkfs.ubifs.h"
@@ -102,6 +103,7 @@ static libubi_t ubi;
 /* Debug levels are: 0 (none), 1 (statistics), 2 (files) ,3 (more details) */
 int debug_level;
 int verbose;
+int yes;
 
 static char *root;
 static int root_len;
@@ -132,7 +134,7 @@ static struct inum_mapping **hash_table;
 /* Inode creation sequence number */
 static unsigned long long creat_sqnum;
 
-static const char *optstring = "d:r:m:o:D:h?vVe:c:g:f:Fp:k:x:X:j:R:l:j:UQq";
+static const char *optstring = "d:r:m:o:D:yh?vVe:c:g:f:Fp:k:x:X:j:R:l:j:UQq";
 
 static const struct option longopts[] = {
 	{"root",               1, NULL, 'r'},
@@ -141,6 +143,7 @@ static const struct option longopts[] = {
 	{"max-leb-cnt",        1, NULL, 'c'},
 	{"output",             1, NULL, 'o'},
 	{"devtable",           1, NULL, 'D'},
+	{"yes",                0, NULL, 'y'},
 	{"help",               0, NULL, 'h'},
 	{"verbose",            0, NULL, 'v'},
 	{"version",            0, NULL, 'V'},
@@ -190,6 +193,7 @@ static const char *helptext =
 "-U, --squash-uids        squash owners making all files owned by root\n"
 "-l, --log-lebs=COUNT     count of erase blocks for the log (used only for\n"
 "                         debugging)\n"
+"-y, --yes                assume the answer is \"yes\" for all questions\n"
 "-v, --verbose            verbose operation\n"
 "-V, --version            display version information\n"
 "-g, --debug=LEVEL        display debug information (0 - none, 1 - statistics,\n"
@@ -235,92 +239,50 @@ static char *make_path(const char *dir, const char *name)
 }
 
 /**
- * same_dir - determine if two file descriptors refer to the same directory.
- * @fd1: file descriptor 1
- * @fd2: file descriptor 2
- */
-static int same_dir(int fd1, int fd2)
-{
-	struct stat stat1, stat2;
-
-	if (fstat(fd1, &stat1) == -1)
-		return -1;
-	if (fstat(fd2, &stat2) == -1)
-		return -1;
-	return stat1.st_dev == stat2.st_dev && stat1.st_ino == stat2.st_ino;
-}
-
-/**
- * do_openat - open a file in a directory.
- * @fd: file descriptor of open directory
- * @path: path relative to directory
- * @flags: open flags
+ * is_contained - determine if a file is beneath a directory.
+ * @file: file path name
+ * @dir: directory path name
  *
- * This function is provided because the library function openat is sometimes
- * not available.
+ * This function returns %1 if @file is accessible from the @dir directory and
+ * %0 otherwise. In case of error, returns %-1.
  */
-static int do_openat(int fd, const char *path, int flags)
+static int is_contained(const char *file, const char *dir)
 {
-	int ret;
-	char *cwd;
+	char *real_file = NULL;
+	char *real_dir = NULL;
+	char *file_base, *copy;
+	int ret = -1;
 
-	cwd = getcwd(NULL, 0);
-	if (!cwd)
+	/* Make a copy of the file path because 'dirname()' can modify it */
+	copy = strdup(file);
+	if (!copy)
 		return -1;
-	ret = fchdir(fd);
-	if (ret != -1)
-		ret = open(path, flags);
-	if (chdir(cwd) && !ret)
-		ret = -1;
-	free(cwd);
-	return ret;
-}
+	file_base = dirname(copy);
 
-/**
- * in_path - determine if a file is beneath a directory.
- * @dir_name: directory path name
- * @file_name: file path name
- */
-static int in_path(const char *dir_name, const char *file_name)
-{
-	char *fn = strdup(file_name);
-	char *dn;
-	int fd1, fd2, fd3, ret = -1, top_fd;
+	/* Turn the paths into the canonical form */
+	real_file = malloc(PATH_MAX);
+	if (!real_file)
+		goto out_free;
 
-	if (!fn)
-		return -1;
-	top_fd = open("/", O_RDONLY);
-	if (top_fd != -1) {
-		dn = dirname(fn);
-		fd1 = open(dir_name, O_RDONLY);
-		if (fd1 != -1) {
-			fd2 = open(dn, O_RDONLY);
-			if (fd2 != -1) {
-				while (1) {
-					int same;
+	real_dir = malloc(PATH_MAX);
+	if (!real_dir)
+		goto out_free;
 
-					same = same_dir(fd1, fd2);
-					if (same) {
-						ret = same;
-						break;
-					}
-					if (same_dir(fd2, top_fd)) {
-						ret = 0;
-						break;
-					}
-					fd3 = do_openat(fd2, "..", O_RDONLY);
-					if (fd3 == -1)
-						break;
-					close(fd2);
-					fd2 = fd3;
-				}
-				close(fd2);
-			}
-			close(fd1);
-		}
-		close(top_fd);
+	if (!realpath(file_base, real_file)) {
+		perror("Could not canonicalize file path");
+		goto out_free;
 	}
-	free(fn);
+	if (!realpath(dir, real_dir)) {
+		perror("Could not canonicalize directory");
+		goto out_free;
+	}
+
+	ret = !!strstr(real_file, real_dir);
+
+out_free:
+	free(copy);
+	free(real_file);
+	free(real_dir);
 	return ret;
 }
 
@@ -376,22 +338,28 @@ static int validate_options(void)
 
 	if (!output)
 		return err_msg("no output file or UBI volume specified");
-	if (root && in_path(root, output))
-		return err_msg("output file cannot be in the UBIFS root "
-			       "directory");
+	if (root) {
+		tmp = is_contained(output, root);
+		if (tmp < 0)
+			return err_msg("failed to perform output file root check");
+		else if (tmp)
+			return err_msg("output file cannot be in the UBIFS root "
+			               "directory");
+	}
 	if (!is_power_of_2(c->min_io_size))
 		return err_msg("min. I/O unit size should be power of 2");
 	if (c->leb_size < c->min_io_size)
 		return err_msg("min. I/O unit cannot be larger than LEB size");
 	if (c->leb_size < UBIFS_MIN_LEB_SZ)
 		return err_msg("too small LEB size %d, minimum is %d",
-			       c->min_io_size, UBIFS_MIN_LEB_SZ);
+			       c->leb_size, UBIFS_MIN_LEB_SZ);
 	if (c->leb_size % c->min_io_size)
 		return err_msg("LEB should be multiple of min. I/O units");
 	if (c->leb_size % 8)
 		return err_msg("LEB size has to be multiple of 8");
 	if (c->leb_size > UBIFS_MAX_LEB_SZ)
-		return err_msg("too large LEB size %d", c->leb_size);
+		return err_msg("too large LEB size %d, maximum is %d",
+				c->leb_size, UBIFS_MAX_LEB_SZ);
 	if (c->max_leb_cnt < UBIFS_MIN_LEB_CNT)
 		return err_msg("too low max. count of LEBs, minimum is %d",
 			       UBIFS_MIN_LEB_CNT);
@@ -567,13 +535,16 @@ static int get_options(int argc, char**argv)
 				return err_msg("bad maximum LEB count");
 			break;
 		case 'o':
-			output = strdup(optarg);
+			output = xstrdup(optarg);
 			break;
 		case 'D':
 			tbl_file = optarg;
 			if (stat(tbl_file, &st) < 0)
 				return sys_err_msg("bad device table file '%s'",
 						   tbl_file);
+			break;
+		case 'y':
+			yes = 1;
 			break;
 		case 'h':
 		case '?':
@@ -657,7 +628,7 @@ static int get_options(int argc, char**argv)
 	}
 
 	if (optind != argc && !output)
-		output = strdup(argv[optind]);
+		output = xstrdup(argv[optind]);
 
 	if (!output)
 		return err_msg("not output device or file specified");
@@ -774,25 +745,23 @@ static void prepare_node(void *node, int len)
  * @lnum: LEB number
  * @len: length of data in the buffer
  * @buf: buffer (must be at least c->leb_size bytes)
- * @dtype: expected data type
  */
-int write_leb(int lnum, int len, void *buf, int dtype)
+int write_leb(int lnum, int len, void *buf)
 {
-	off64_t pos = (off64_t)lnum * c->leb_size;
+	off_t pos = (off_t)lnum * c->leb_size;
 
 	dbg_msg(3, "LEB %d len %d", lnum, len);
 	memset(buf + len, 0xff, c->leb_size - len);
 	if (out_ubi)
-		if (ubi_leb_change_start(ubi, out_fd, lnum, c->leb_size, dtype))
+		if (ubi_leb_change_start(ubi, out_fd, lnum, c->leb_size))
 			return sys_err_msg("ubi_leb_change_start failed");
 
-	if (lseek64(out_fd, pos, SEEK_SET) != pos)
-		return sys_err_msg("lseek64 failed seeking %lld",
-				   (long long)pos);
+	if (lseek(out_fd, pos, SEEK_SET) != pos)
+		return sys_err_msg("lseek failed seeking %"PRIdoff_t, pos);
 
 	if (write(out_fd, buf, c->leb_size) != c->leb_size)
-		return sys_err_msg("write failed writing %d bytes at pos %lld",
-				   c->leb_size, (long long)pos);
+		return sys_err_msg("write failed writing %d bytes at pos %"PRIdoff_t,
+				   c->leb_size, pos);
 
 	return 0;
 }
@@ -800,11 +769,10 @@ int write_leb(int lnum, int len, void *buf, int dtype)
 /**
  * write_empty_leb - copy the image of an empty LEB to the output target.
  * @lnum: LEB number
- * @dtype: expected data type
  */
-static int write_empty_leb(int lnum, int dtype)
+static int write_empty_leb(int lnum)
 {
-	return write_leb(lnum, 0, leb_buf, dtype);
+	return write_leb(lnum, 0, leb_buf);
 }
 
 /**
@@ -851,9 +819,8 @@ static int do_pad(void *buf, int len)
  * @node: node
  * @len: node length
  * @lnum: LEB number
- * @dtype: expected data type
  */
-static int write_node(void *node, int len, int lnum, int dtype)
+static int write_node(void *node, int len, int lnum)
 {
 	prepare_node(node, len);
 
@@ -861,7 +828,7 @@ static int write_node(void *node, int len, int lnum, int dtype)
 
 	len = do_pad(leb_buf, len);
 
-	return write_leb(lnum, len, leb_buf, dtype);
+	return write_leb(lnum, len, leb_buf);
 }
 
 /**
@@ -973,7 +940,7 @@ static int flush_nodes(void)
 	if (!head_offs)
 		return 0;
 	len = do_pad(leb_buf, head_offs);
-	err = write_leb(head_lnum, len, leb_buf, UBI_UNKNOWN);
+	err = write_leb(head_lnum, len, leb_buf);
 	if (err)
 		return err;
 	set_lprops(head_lnum, head_offs, head_flags);
@@ -1901,7 +1868,7 @@ static int set_gc_lnum(void)
 	int err;
 
 	c->gc_lnum = head_lnum++;
-	err = write_empty_leb(c->gc_lnum, UBI_LONGTERM);
+	err = write_empty_leb(c->gc_lnum);
 	if (err)
 		return err;
 	set_lprops(c->gc_lnum, 0, 0);
@@ -1977,7 +1944,7 @@ static int write_super(void)
 	if (c->space_fixup)
 		sup.flags |= cpu_to_le32(UBIFS_FLG_SPACE_FIXUP);
 
-	return write_node(&sup, UBIFS_SB_NODE_SZ, UBIFS_SB_LNUM, UBI_LONGTERM);
+	return write_node(&sup, UBIFS_SB_NODE_SZ, UBIFS_SB_LNUM);
 }
 
 /**
@@ -2020,13 +1987,11 @@ static int write_master(void)
 	mst.total_dark   = cpu_to_le64(c->lst.total_dark);
 	mst.leb_cnt      = cpu_to_le32(c->leb_cnt);
 
-	err = write_node(&mst, UBIFS_MST_NODE_SZ, UBIFS_MST_LNUM,
-			 UBI_SHORTTERM);
+	err = write_node(&mst, UBIFS_MST_NODE_SZ, UBIFS_MST_LNUM);
 	if (err)
 		return err;
 
-	err = write_node(&mst, UBIFS_MST_NODE_SZ, UBIFS_MST_LNUM + 1,
-			 UBI_SHORTTERM);
+	err = write_node(&mst, UBIFS_MST_NODE_SZ, UBIFS_MST_LNUM + 1);
 	if (err)
 		return err;
 
@@ -2046,14 +2011,14 @@ static int write_log(void)
 	cs.ch.node_type = UBIFS_CS_NODE;
 	cs.cmt_no = cpu_to_le64(0);
 
-	err = write_node(&cs, UBIFS_CS_NODE_SZ, lnum, UBI_UNKNOWN);
+	err = write_node(&cs, UBIFS_CS_NODE_SZ, lnum);
 	if (err)
 		return err;
 
 	lnum += 1;
 
 	for (i = 1; i < c->log_lebs; i++, lnum++) {
-		err = write_empty_leb(lnum, UBI_UNKNOWN);
+		err = write_empty_leb(lnum);
 		if (err)
 			return err;
 	}
@@ -2074,7 +2039,7 @@ static int write_lpt(void)
 
 	lnum = c->nhead_lnum + 1;
 	while (lnum <= c->lpt_last) {
-		err = write_empty_leb(lnum++, UBI_SHORTTERM);
+		err = write_empty_leb(lnum++);
 		if (err)
 			return err;
 	}
@@ -2091,7 +2056,7 @@ static int write_orphan_area(void)
 
 	lnum = UBIFS_LOG_LNUM + c->log_lebs + c->lpt_lebs;
 	for (i = 0; i < c->orph_lebs; i++, lnum++) {
-		err = write_empty_leb(lnum, UBI_SHORTTERM);
+		err = write_empty_leb(lnum);
 		if (err)
 			return err;
 	}
@@ -2137,11 +2102,13 @@ static int open_target(void)
 		if (out_fd == -1)
 			return sys_err_msg("cannot open the UBI volume '%s'",
 					   output);
-		if (ubi_set_property(out_fd, UBI_PROP_DIRECT_WRITE, 1))
+		if (ubi_set_property(out_fd, UBI_VOL_PROP_DIRECT_WRITE, 1))
 			return sys_err_msg("ubi_set_property failed");
 
-		if (check_volume_empty())
-			return err_msg("UBI volume is not empty");
+		if (!yes && check_volume_empty()) {
+			if (!prompt("UBI volume is not empty.  Format anyways?", false))
+				return err_msg("UBI volume is not empty");
+		}
 	} else {
 		out_fd = open(output, O_CREAT | O_RDWR | O_TRUNC,
 			      S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);

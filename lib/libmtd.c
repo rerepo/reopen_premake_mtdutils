@@ -403,6 +403,8 @@ static int type_str2int(const char *str)
 {
 	if (!strcmp(str, "nand"))
 		return MTD_NANDFLASH;
+	if (!strcmp(str, "mlc-nand"))
+		return MTD_MLCNANDFLASH;
 	if (!strcmp(str, "nor"))
 		return MTD_NORFLASH;
 	if (!strcmp(str, "rom"))
@@ -774,7 +776,8 @@ int mtd_get_dev_info1(libmtd_t desc, int mtd_num, struct mtd_dev_info *mtd)
 
 	mtd->eb_cnt = mtd->size / mtd->eb_size;
 	mtd->type = type_str2int(mtd->type_str);
-	mtd->bb_allowed = !!(mtd->type == MTD_NANDFLASH);
+	mtd->bb_allowed = !!(mtd->type == MTD_NANDFLASH ||
+				mtd->type == MTD_MLCNANDFLASH);
 
 	return 0;
 }
@@ -1063,8 +1066,8 @@ int mtd_read(const struct mtd_dev_info *mtd, int fd, int eb, int offs,
 	/* Seek to the beginning of the eraseblock */
 	seek = (off_t)eb * mtd->eb_size + offs;
 	if (lseek(fd, seek, SEEK_SET) != seek)
-		return sys_errmsg("cannot seek mtd%d to offset %llu",
-				  mtd->mtd_num, (unsigned long long)seek);
+		return sys_errmsg("cannot seek mtd%d to offset %"PRIdoff_t,
+				  mtd->mtd_num, seek);
 
 	while (rd < len) {
 		ret = read(fd, buf, len);
@@ -1171,8 +1174,8 @@ int mtd_write(libmtd_t desc, const struct mtd_dev_info *mtd, int fd, int eb,
 	if (data) {
 		/* Seek to the beginning of the eraseblock */
 		if (lseek(fd, seek, SEEK_SET) != seek)
-			return sys_errmsg("cannot seek mtd%d to offset %llu",
-					mtd->mtd_num, (unsigned long long)seek);
+			return sys_errmsg("cannot seek mtd%d to offset %"PRIdoff_t,
+					mtd->mtd_num, seek);
 		ret = write(fd, data, len);
 		if (ret != len)
 			return sys_errmsg("cannot write %d bytes to mtd%d "
@@ -1329,8 +1332,8 @@ int mtd_write_img(const struct mtd_dev_info *mtd, int fd, int eb, int offs,
 	/* Seek to the beginning of the eraseblock */
 	seek = (off_t)eb * mtd->eb_size + offs;
 	if (lseek(fd, seek, SEEK_SET) != seek) {
-		sys_errmsg("cannot seek mtd%d to offset %llu",
-			    mtd->mtd_num, (unsigned long long)seek);
+		sys_errmsg("cannot seek mtd%d to offset %"PRIdoff_t,
+			    mtd->mtd_num, seek);
 		goto out_close;
 	}
 
